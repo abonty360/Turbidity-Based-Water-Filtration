@@ -1,22 +1,34 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-LiquidCrystal_I2C lcd(0x20, 16, 2);  // Change to 0x27 if needed
+LiquidCrystal_I2C lcd(0x20, 16, 2);
 
 #define SENSOR_PIN A0
 #define SAMPLE_COUNT 20
-#define PUMP_PIN 7
 
-bool pumpState = false;
+#define PUMP_PIN 7   // drain pump
+#define PUMP2_PIN 6  // refill pump
 
-unsigned long stateChangeTimer = 0;
-unsigned long pumpStartTime = 0;
+// ---------- Pump timing ----------
+const unsigned long confirmTime = 3000;
+const unsigned long drainTime = 10000;
+const unsigned long waitTime = 5000;
+const unsigned long refillTime = 10000;
 
-const unsigned long confirmTime = 3000;  // 3 seconds
-const unsigned long pumpRunTime = 10000;
+// ---------- System states ----------
+#define IDLE 0
+#define DRAIN 1
+#define WAIT 2
+#define REFILL 3
+
+int systemState = IDLE;
+
+unsigned long stateTimer = 0;
+unsigned long confirmTimer = 0;
+
 bool pumpTriggered = false;
 
-
+// ---------- Turbidity filtering ----------
 float filteredNTU;
 float alpha = 0.15;
 bool firstRun = true;
@@ -24,26 +36,26 @@ bool firstRun = true;
 int previousNTU = -1;
 int previousState = -1;
 
-
 void setup() {
   Serial.begin(9600);
 
   pinMode(PUMP_PIN, OUTPUT);
+  pinMode(PUMP2_PIN, OUTPUT);
+
   digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(PUMP2_PIN, LOW);
 
   lcd.init();
   lcd.backlight();
 
   lcd.setCursor(0, 0);
   lcd.print("Turbidity Meter");
-
   lcd.setCursor(0, 1);
   lcd.print("Warming Up...");
   delay(3000);
 
   lcd.clear();
 }
-
 
 void loop() {
 
@@ -53,7 +65,7 @@ void loop() {
 
   for (int i = 0; i < SAMPLE_COUNT; i++) {
     sum += analogRead(SENSOR_PIN);
-    delay(5);  // improves ADC stability
+    delay(5);
   }
 
   int avgValue = sum / SAMPLE_COUNT;
@@ -64,7 +76,7 @@ void loop() {
   int rawNTU = map(avgValue, 0, 1023, 3000, 0);
 
 
-  // -------- Exponential Smoothing --------
+  // -------- Exponential smoothing --------
 
   if (firstRun) {
     filteredNTU = rawNTU;
@@ -75,63 +87,101 @@ void loop() {
 
   int displayNTU = (int)filteredNTU;
 
-  // -------- Pump Decision Logic (Hysteresis) --------
 
-  bool shouldPumpRun;
-  if (displayNTU >= 1000)
-    shouldPumpRun = true;
-  else if (displayNTU <= 900)
-    shouldPumpRun = false;
-  else
-    shouldPumpRun = pumpState;
-
-  // -------- Reset trigger when water becomes clean --------
- // Proteus: use very high NTU (>=2000) to simulate air / empty tank
+  // -------- Reset trigger (Proteus empty tank simulation) --------
 
   if (displayNTU >= 2100) {
+    if (pumpTriggered == true) {
+      Serial.println("Pump cycle reset (empty tank detected)");
+    }
     pumpTriggered = false;
   }
- /*
-  -------- Hardware modification later --------
 
-  Replace the above reset condition with something like:
 
-  const int AIR_VALUE = 50;
+  // -------- Detect cloudy condition --------
 
-  if(displayNTU <= AIR_VALUE)
-      pumpTriggered = false;
+  bool cloudy;
 
-  because turbidity sensors usually output very low NTU in air.
-  */
-  // -------- Start pump only once per cloudy event --------
+  if (displayNTU >= 1000)
+    cloudy = true;
+  else if (displayNTU <= 900)
+    cloudy = false;
+  else
+    cloudy = (systemState != IDLE);
 
-  if (!pumpState && !pumpTriggered && shouldPumpRun) {
-    if (stateChangeTimer == 0)
-      stateChangeTimer = millis();
 
-    if (millis() - stateChangeTimer > confirmTime) {
-      pumpState = true;
+  // -------- Start filtration cycle --------
+
+  if (systemState == IDLE && cloudy && !pumpTriggered) {
+    if (confirmTimer == 0)
+      confirmTimer = millis();
+
+    if (millis() - confirmTimer > confirmTime) {
+      systemState = DRAIN;
+      stateTimer = millis();
       pumpTriggered = true;
 
       digitalWrite(PUMP_PIN, HIGH);
-      pumpStartTime = millis();
 
-      Serial.println("Pump ON");
-
-      stateChangeTimer = 0;
+      Serial.println("Drain Pump ON");
     }
   } else {
-    stateChangeTimer = 0;
+    confirmTimer = 0;
   }
 
-  // -------- Fixed Pump Runtime (10s) --------
 
-  if (pumpState && millis() - pumpStartTime >= pumpRunTime) {
-    digitalWrite(PUMP_PIN, LOW);
-    pumpState = false;
-    Serial.println(millis() - pumpStartTime);
-    Serial.println("Pump OFF (10s completed)");
+  // -------- State Machine --------
+
+  switch (systemState) {
+
+    case DRAIN:
+
+      if (millis() - stateTimer >= drainTime) {
+        digitalWrite(PUMP_PIN, LOW);
+        Serial.print("Drain runtime (ms): ");
+    Serial.println(millis() - stateTimer);
+
+        systemState = WAIT;
+        stateTimer = millis();
+
+        Serial.println("Drain Pump OFF");
+      }
+
+      break;
+
+
+    case WAIT:
+
+      if (millis() - stateTimer >= waitTime) {
+        Serial.print("Wait time (ms): ");
+        Serial.println(millis() - stateTimer);
+        digitalWrite(PUMP2_PIN, HIGH);
+
+        systemState = REFILL;
+        stateTimer = millis();
+
+        Serial.println("Refill Pump ON");
+      }
+
+      break;
+
+
+    case REFILL:
+
+      if (millis() - stateTimer >= refillTime) {
+        digitalWrite(PUMP2_PIN, LOW);
+        Serial.print("Refill runtime (ms): ");
+    Serial.println(millis() - stateTimer);
+
+        systemState = IDLE;
+        stateTimer = 0;
+
+        Serial.println("Refill Pump OFF");
+      }
+
+      break;
   }
+
 
   // -------- Water Quality Classification --------
 
@@ -145,9 +195,10 @@ void loop() {
     state = 2;
 
 
-  // -------- LCD Update (only when needed) --------
+  // -------- LCD Update --------
 
   if (abs(displayNTU - previousNTU) > 5 || state != previousState) {
+
     lcd.setCursor(0, 0);
     lcd.print("NTU:      ");
     lcd.setCursor(5, 0);
