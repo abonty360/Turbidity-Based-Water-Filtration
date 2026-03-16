@@ -86,11 +86,23 @@ void loop() {
     shouldPumpRun = pumpState;
 
   // -------- Reset trigger when water becomes clean --------
+ // Proteus: use very high NTU (>=2000) to simulate air / empty tank
 
-  if (displayNTU <= 900) {
+  if (displayNTU >= 2100) {
     pumpTriggered = false;
   }
+ /*
+  -------- Hardware modification later --------
 
+  Replace the above reset condition with something like:
+
+  const int AIR_VALUE = 50;
+
+  if(displayNTU <= AIR_VALUE)
+      pumpTriggered = false;
+
+  because turbidity sensors usually output very low NTU in air.
+  */
   // -------- Start pump only once per cloudy event --------
 
   if (!pumpState && !pumpTriggered && shouldPumpRun) {
