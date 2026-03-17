@@ -8,6 +8,7 @@ LiquidCrystal_I2C lcd(0x20, 16, 2);
 
 #define PUMP_PIN 7   // drain pump
 #define PUMP2_PIN 6  // refill pump
+const float airVoltageThreshold = 3.2;
 
 // ---------- Pump timing ----------
 const unsigned long confirmTime = 3000;
